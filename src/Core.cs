@@ -34,6 +34,15 @@ namespace Dungeons2SkinLoader
         }
     }
 
+    /// <summary>A cape texture that the player already owns in the game's Locker.
+    /// The app deliberately replaces only this texture; it never grants or unlocks
+    /// the underlying cosmetic item.</summary>
+    public class Cape
+    {
+        public string Name; public Pkg Texture; public int Width, Height, PixelBytes;
+        public string Key { get { return Name.ToLowerInvariant(); } }
+    }
+
     public class Geo { public float[] Pos; public float[] Uv; public ushort[] Tris; public float[] Nrm; }
 
     public class GameData
@@ -41,6 +50,7 @@ namespace Dungeons2SkinLoader
         public ulong UtocSize, ContainerId;
         public byte[] Key;
         public List<Hero> Heroes = new List<Hero>();
+        public List<Cape> Capes = new List<Cape>();
         public Pkg[] Mesh = new Pkg[2];      // [0] with outer layers, [1] without
         public byte[][] Remap;               // dx, dy, sx, sy
         public Dictionary<int, int> Blink = new Dictionary<int, int>();  // col*8+row -> tu*8+tv
@@ -88,6 +98,18 @@ namespace Dungeons2SkinLoader
                 for (int i = 0; i < no; i++) { var b = r.ReadBytes(4); d.BlinkOuter[b[0] * 8 + b[1]] = new Point(b[2], b[3]); }
                 int nc = r.ReadInt32(); d.IconCam = Floats(r, nc);
             }
+            // v4 reserves original cape packages solely for texture replacement.
+            // Older embedded data remains valid and simply exposes no capes.
+            if (version >= 4)
+            {
+                int count = r.ReadInt32();
+                for (int i = 0; i < count; i++)
+                {
+                    var cape = new Cape { Name = Str(r), Texture = ReadPkg(r, true) };
+                    cape.Width = r.ReadInt32(); cape.Height = r.ReadInt32(); cape.PixelBytes = r.ReadInt32();
+                    d.Capes.Add(cape);
+                }
+            }
             return d;
         }
         static string Str(BinaryReader r) { int n = r.ReadUInt16(); return Encoding.UTF8.GetString(r.ReadBytes(n)); }
@@ -102,6 +124,7 @@ namespace Dungeons2SkinLoader
             return p;
         }
         public Hero FindHero(string key) { return Heroes.FirstOrDefault(h => h.Key == key); }
+        public Cape FindCape(string key) { return Capes.FirstOrDefault(c => string.Equals(c.Key, key, StringComparison.OrdinalIgnoreCase)); }
     }
 
     // ------------------------------------------------------------------ images
@@ -620,6 +643,11 @@ namespace Dungeons2SkinLoader
         public int? LidColor2;  // optional separate colour for the right eye (eye 2)
     }
 
+    public class CapeSlot
+    {
+        public string CapeKey; public string ImagePath;
+    }
+
     public static class ModBuilder
     {
         public const string ModName = "zzz_Dungeons2SkinLoader_P";
@@ -640,7 +668,7 @@ namespace Dungeons2SkinLoader
         }
 
         /// <summary>Builds the three mod files (pak, utoc, ucas) for the given skins.</summary>
-        public static Dictionary<string, byte[]> Build(GameData gd, IList<SkinSlot> slots, bool layers, Action<string> log, bool includeMesh = true)
+        public static Dictionary<string, byte[]> Build(GameData gd, IList<SkinSlot> slots, bool layers, Action<string> log, bool includeMesh = true, CapeSlot capeSlot = null)
         {
             var chunks = new List<Tuple<byte[], byte[]>>(); var paths = new List<Tuple<string, int>>(); var imports = new List<List<byte[]>>();
             Action<Pkg, byte[]> add = (p, data) =>
@@ -659,6 +687,18 @@ namespace Dungeons2SkinLoader
                 var icon = Renderer.RenderIcon(geo, tex, 256, gd.IconCam);
                 add(h.Icon, Patch(h.Icon.Data, h.Icon.PixelOffset, Encoders.Bc3(icon)));
                 if (log != null) log(h.Display + "  <-  " + Path.GetFileName(s.ImagePath));
+            }
+            if (capeSlot != null)
+            {
+                var cape = gd.FindCape(capeSlot.CapeKey);
+                if (cape == null) throw new InvalidDataException("Unknown or unavailable cape '" + capeSlot.CapeKey + "'. Re-export the game data with cape support.");
+                var image = Img.FromFile(capeSlot.ImagePath);
+                if (image.W != cape.Width || image.H != cape.Height)
+                    throw new InvalidDataException("The " + cape.Name + " cape image must be " + cape.Width + "x" + cape.Height + " pixels; this image is " + image.W + "x" + image.H + ".");
+                if (cape.PixelBytes != cape.Width * cape.Height * 4)
+                    throw new InvalidDataException("This game build's " + cape.Name + " cape texture uses an unsupported pixel format.");
+                add(cape.Texture, Patch(cape.Texture.Data, cape.Texture.PixelOffset, Encoders.Bgra(image)));
+                if (log != null) log("Cape " + cape.Name + "  <-  " + Path.GetFileName(capeSlot.ImagePath));
             }
             var mesh = gd.Mesh[layers ? 0 : 1];
             add(mesh, mesh.Data);
